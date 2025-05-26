@@ -1,0 +1,20 @@
+# DS_Store
+.DS_Store
+
+# Google Service Account Key
+service-account-key.json
+
+# Virtual Environment
+.venv/
+
+# Python cache files
+__pycache__/
+
+# Secrets
+.env
+
+# Logs
+logs/
+
+# Plugins
+plugins/
