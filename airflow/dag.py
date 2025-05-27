@@ -1,16 +1,21 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.bash import BashOperator
+from airflow.providers.google.cloud.operators.dataproc import (
+    DataprocCreateClusterOperator,
+    DataprocDeleteClusterOperator,
+    DataprocSubmitPySparkJobOperator,
+)
 from airflow.providers.google.cloud.operators.bigquery import *
-from airflow.utils.dates import days_ago
 from airflow.utils.trigger_rule import TriggerRule
+from airflow.utils.dates import days_ago
 from datetime import datetime, timedelta
 import logging
 
-from data.collector import NBADataCollector
-from data.spark import NBAFeatureEngineer
-from notebooks.models import NBAModelTrainer, NBAPredictor
-from google.cloud import bigquery
+from data.collector import NBACollector
+from data.schema import create_optimized_tables
+from notebooks.models import AdvancedNBAModelTrainer
+from setup.dataproc_setup import DataprocManager
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -24,447 +29,477 @@ default_args = {
     'email_on_retry': False,
     'retries': 2,
     'retry_delay': timedelta(minutes=5),
-    'email': ['admin@company.com'],  # Add your email
+    'email': ['hsbajwah@gmail.com'],
 }
 
 dag = DAG(
     'nba_betting_ml_pipeline',
     default_args=default_args,
-    description='Production NBA betting ML pipeline with BigQuery operators',
+    description='NBA betting ML pipeline',
     schedule_interval='0 10 * * *',  # Daily at 10 AM
     catchup=False,
     max_active_runs=1,
     tags=['nba', 'betting', 'ml', 'production'],
 )
 
-# Constants
+# Configuration
 PROJECT_ID = settings.PROJECT_ID
 DATASET_ID = settings.DATASET_ID
-GCS_BUCKET = f"{PROJECT_ID}-nba-data"
-LOCATION = "US"
+GCS_BUCKET = settings.GCS_BUCKET
+GCP_REGION = settings.GCP_REGION
+DATAPROC_CLUSTER_NAME = f"nba-feature-eng-{{{{ ds_nodash }}}}"
 
-# SQL Queries
-CREATE_FEATURE_SET_QUERY = f"""
-CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.feature_set` AS
-WITH team_stats AS (
-    SELECT
-        ps.game_id,
-        ps.team_id,
-        AVG(ps.points) as avg_points,
-        AVG(ps.rebounds) as avg_rebounds,
-        AVG(ps.assists) as avg_assists,
-        AVG(CASE WHEN ps.field_goals_attempted > 0
-            THEN ps.field_goals_made / ps.field_goals_attempted
-            ELSE 0 END) as avg_fg_pct,
-        AVG(CASE WHEN ps.three_pointers_attempted > 0
-            THEN ps.three_pointers_made / ps.three_pointers_attempted
-            ELSE 0 END) as avg_3p_pct,
-        SUM(ps.points) as team_points,
-        SUM(ps.rebounds) as team_rebounds,
-        SUM(ps.assists) as team_assists,
-        SUM(ps.turnovers) as team_turnovers
-    FROM `{PROJECT_ID}.{DATASET_ID}.player_stats` ps
-    GROUP BY ps.game_id, ps.team_id
-),
-home_stats AS (
-    SELECT
-        g.game_id,
-        g.game_date,
-        g.home_team_id,
-        g.away_team_id,
-        g.home_win,
-        g.home_score,
-        g.away_score,
-        ts.avg_points as home_avg_points,
-        ts.avg_rebounds as home_avg_rebounds,
-        ts.avg_assists as home_avg_assists,
-        ts.avg_fg_pct as home_avg_fg_pct,
-        ts.avg_3p_pct as home_avg_3p_pct,
-        ts.team_points as home_team_points,
-        ts.team_rebounds as home_team_rebounds,
-        ts.team_assists as home_team_assists,
-        ts.team_turnovers as home_team_turnovers
-    FROM `{PROJECT_ID}.{DATASET_ID}.game_stats` g
-    LEFT JOIN team_stats ts ON g.game_id = ts.game_id AND g.home_team_id = ts.team_id
-),
-away_stats AS (
-    SELECT
-        game_id,
-        ts.avg_points as away_avg_points,
-        ts.avg_rebounds as away_avg_rebounds,
-        ts.avg_assists as away_avg_assists,
-        ts.avg_fg_pct as away_avg_fg_pct,
-        ts.avg_3p_pct as away_avg_3p_pct,
-        ts.team_points as away_team_points,
-        ts.team_rebounds as away_team_rebounds,
-        ts.team_assists as away_team_assists,
-        ts.team_turnovers as away_team_turnovers
-    FROM team_stats ts
-)
-SELECT
-    hs.*,
-    aws.away_avg_points,
-    aws.away_avg_rebounds,
-    aws.away_avg_assists,
-    aws.away_avg_fg_pct,
-    aws.away_avg_3p_pct,
-    aws.away_team_points,
-    aws.away_team_rebounds,
-    aws.away_team_assists,
-    aws.away_team_turnovers,
-    EXTRACT(DAYOFWEEK FROM hs.game_date) as day_of_week,
-    EXTRACT(MONTH FROM hs.game_date) as month,
-    CASE WHEN EXTRACT(DAYOFWEEK FROM hs.game_date) IN (1, 7) THEN 1 ELSE 0 END as is_weekend,
-    (hs.home_avg_points - aws.away_avg_points) as points_differential,
-    (hs.home_avg_rebounds - aws.away_avg_rebounds) as rebounds_differential,
-    (hs.home_avg_assists - aws.away_avg_assists) as assists_differential,
-    CURRENT_TIMESTAMP() as features_created_at
-FROM home_stats hs
-LEFT JOIN away_stats aws ON hs.game_id = aws.game_id
-WHERE hs.game_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 730 DAY)
-"""
+# Python Callables
 
-DATA_QUALITY_CHECK_QUERY = f"""
-SELECT 
-    COUNT(*) as total_records,
-    COUNT(CASE WHEN home_win IS NULL THEN 1 END) as null_targets,
-    COUNT(CASE WHEN home_avg_points IS NULL THEN 1 END) as null_features,
-    MIN(game_date) as earliest_date,
-    MAX(game_date) as latest_date
-FROM `{PROJECT_ID}.{DATASET_ID}.feature_set`
-"""
-
-def safe_task_wrapper(func):
-    """Wrapper for safe task execution"""
+def safe_task_execution(func):
+    """Decorator for safe task execution"""
     def wrapper(**context):
         try:
-            return func(**context)
+            start_time = datetime.now()
+            result = func(**context)
+            execution_time = datetime.now() - start_time
+            
+            logger.info(f"Task {func.__name__} completed successfully in {execution_time}")
+            return result
+            
         except Exception as e:
             logger.error(f"Task {func.__name__} failed: {e}")
-            # Send notification or alert here
             raise
     return wrapper
 
-
-@safe_task_wrapper
-def collect_daily_data(**context):
-    """Collect daily NBA games and player stats"""
-    try:
-        client = bigquery.Client(project=PROJECT_ID)
-        collector = NBADataCollector(client)
-
-        # Collect games
-        games = collector.collect_daily_games()
-        if games:
-            collector.upload_to_bigquery("game_stats", games)
-            logger.info(f"Uploaded {len(games)} games")
-
-        # Collect completed game stats
-        completed_games = [g['game_id'] for g in games if g.get('game_status_id') == 3]
-        if completed_games:
-            player_stats = collector.collect_box_scores(completed_games)
-            if player_stats:
-                collector.upload_to_bigquery("player_stats", player_stats)
-                logger.info(f"Uploaded {len(player_stats)} player stat records")
-
-        # Try to collect betting odds
+@safe_task_execution
+def initialize_infrastructure(**context):
+    """Initialize BigQuery tables"""
+    logger.info("Initializing infrastructure...")
+    
+    client = create_optimized_tables()
+    
+    # Verify tables exist
+    tables_to_check = [
+        'raw_games', 'raw_player_boxscores_traditional', 
+        'raw_player_boxscores_advanced', 'feature_set', 'predictions'
+    ]
+    
+    for table_name in tables_to_check:
         try:
-            odds = collector.collect_betting_odds()
-            if odds:
-                collector.upload_to_bigquery("betting_odds", odds)
-                logger.info(f"Uploaded {len(odds)} betting odds")
+            table_ref = client.dataset(DATASET_ID).table(table_name)
+            table = client.get_table(table_ref)
+            logger.info(f"Verified table {table_name}: {table.num_rows} rows")
         except Exception as e:
-            logger.warning(f"Could not collect betting odds: {e}")
+            logger.error(f"Table {table_name} verification failed: {e}")
+            raise
+    
+    return {"tables_verified": len(tables_to_check)}
 
-        return {"games_collected": len(games), "completed_games": len(completed_games)}
-
+@safe_task_execution
+def get_last_processed_date(**context):
+    """Get last processed date with fallback logic"""
+    try:
+        from google.cloud import bigquery
+        client = bigquery.Client(project=PROJECT_ID)
+        
+        # Try to get last processed date from metadata or actual data
+        query = f"""
+        SELECT MAX(game_date) as last_date
+        FROM `{PROJECT_ID}.{DATASET_ID}.raw_games`
+        WHERE load_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+        """
+        
+        result = client.query(query).to_dataframe()
+        
+        if not result.empty and result.iloc[0]['last_date'] is not None:
+            last_date = result.iloc[0]['last_date'].strftime('%Y-%m-%d')
+            logger.info(f"Found last processed date: {last_date}")
+        else:
+            # Fallback to 30 days ago
+            last_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            logger.info(f"Using fallback date: {last_date}")
+        
+        return last_date
+        
     except Exception as e:
-        logger.error(f"Error in data collection: {e}")
+        logger.warning(f"Error getting last processed date: {e}")
+        return (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+
+@safe_task_execution
+def collect_nba_data(**context):
+    """Data collection with comprehensive error handling"""
+    from google.cloud import bigquery
+    
+    last_processed_date = context['task_instance'].xcom_pull(task_ids='get_last_processed_date_task')
+    logger.info(f"Collecting NBA data since: {last_processed_date}")
+    
+    client = bigquery.Client(project=PROJECT_ID)
+    collector = NBACollector(client)
+    
+    collection_summary = {
+        'games_collected': 0,
+        'player_stats_collected': 0,
+        'errors_encountered': 0,
+        'processing_time': None
+    }
+    
+    try:
+        start_time = datetime.now()
+        
+        # Collect recent games (last 7 days)
+        recent_games = collector.collect_daily_games()
+        if recent_games:
+            collector.upload_to_bigquery("raw_games", recent_games)
+            collection_summary['games_collected'] = len(recent_games)
+            logger.info(f"Collected {len(recent_games)} recent games")
+        
+        # Collect completed game stats
+        completed_game_ids = [
+            game['game_id'] for game in recent_games 
+            if game.get('game_status_id') == 3
+        ]
+        
+        if completed_game_ids:
+            # Process in batches for reliability
+            batch_size = settings.NBA_API_BATCH_SIZE
+            total_player_stats = []
+            
+            for i in range(0, len(completed_game_ids), batch_size):
+                batch = completed_game_ids[i:i+batch_size]
+                logger.info(f"Processing batch {i//batch_size + 1}: {len(batch)} games")
+                
+                player_stats = collector.collect_box_scores_batch(batch)
+                if player_stats:
+                    total_player_stats.extend(player_stats)
+            
+            if total_player_stats:
+                collector.upload_to_bigquery("raw_player_boxscores_traditional", total_player_stats)
+                collection_summary['player_stats_collected'] = len(total_player_stats)
+        
+        # Generate collection report
+        report = collector.generate_collection_report()
+        collection_summary['errors_encountered'] = len(report.get('failed_operations', []))
+        collection_summary['processing_time'] = str(datetime.now() - start_time)
+        
+        logger.info(f"Data collection summary: {collection_summary}")
+        return collection_summary
+        
+    except Exception as e:
+        logger.error(f"Critical error in data collection: {e}")
+        collection_summary['errors_encountered'] += 1
         raise
 
+@safe_task_execution
+def validate_data_quality(**context):
+    """Comprehensive data quality validation"""
+    from google.cloud import bigquery
+    
+    client = bigquery.Client(project=PROJECT_ID)
+    
+    validation_queries = {
+        'games_today': f"""
+            SELECT COUNT(*) as count
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_games`
+            WHERE game_date = CURRENT_DATE()
+        """,
+        'complete_games_today': f"""
+            SELECT COUNT(*) as count  
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_games`
+            WHERE game_date = CURRENT_DATE()
+            AND wl_home IS NOT NULL
+        """,
+        'player_stats_today': f"""
+            SELECT COUNT(*) as count
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_player_boxscores_traditional`
+            WHERE DATE(load_timestamp) = CURRENT_DATE()
+        """,
+        'data_quality_score': f"""
+            SELECT AVG(data_quality_score) as avg_quality
+            FROM `{PROJECT_ID}.{DATASET_ID}.raw_games`
+            WHERE game_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+        """
+    }
+    
+    validation_results = {}
+    
+    for check_name, query in validation_queries.items():
+        try:
+            result = client.query(query).to_dataframe()
+            validation_results[check_name] = result.iloc[0].values[0] if not result.empty else 0
+        except Exception as e:
+            logger.warning(f"Validation check {check_name} failed: {e}")
+            validation_results[check_name] = 'error'
+    
+    logger.info(f"Data quality validation: {validation_results}")
+    
+    # Check if we have sufficient data for feature engineering
+    games_today = validation_results.get('games_today', 0)
+    if games_today == 0:
+        logger.warning("No games found for today - may skip feature engineering")
+        return {'proceed_with_features': False, 'validation_results': validation_results}
+    
+    return {'proceed_with_features': True, 'validation_results': validation_results}
 
-def should_retrain_model(**context):
-    """Determine if model should be retrained"""
+def check_feature_engineering_needed(**context):
+    """Determine if feature engineering should proceed"""
+    validation_result = context['task_instance'].xcom_pull(task_ids='validate_data_quality_task')
+    
+    if validation_result.get('proceed_with_features', False):
+        return 'create_dataproc_cluster_task'
+    else:
+        return 'skip_feature_engineering_task'
+
+@safe_task_execution
+def create_ephemeral_dataproc_cluster(**context):
+    """Create cost-optimized ephemeral Dataproc cluster"""
+    dataproc_manager = DataprocManager()
+    
+    cluster_name = DATAPROC_CLUSTER_NAME.format(ds_nodash=context['ds_nodash'])
+    
     try:
-        should_retrain = check_model_performance(**context)
-        if should_retrain:
-            return 'train_models'
-        else:
-            return 'make_daily_predictions'
+        created_cluster = dataproc_manager.create_ephemeral_cluster(cluster_name)
+        logger.info(f"Created Dataproc cluster: {created_cluster}")
+        return cluster_name
+        
     except Exception as e:
-        logger.error(f"Error checking model performance: {e}")
-        return 'make_daily_predictions'  # Default to predictions
+        logger.error(f"Failed to create Dataproc cluster: {e}")
+        raise
 
-
-def train_models(**context):
-    """Train ML models"""
+@safe_task_execution
+def submit_spark_feature_engineering(**context):
+    """Submit PySpark job for advanced feature engineering"""
+    cluster_name = context['task_instance'].xcom_pull(task_ids='create_dataproc_cluster_task')
+    last_processed_date = context['task_instance'].xcom_pull(task_ids='get_last_processed_date_task')
+    
+    dataproc_manager = DataprocManager()
+    
+    # PySpark script arguments
+    spark_args = [
+        f"--project-id={PROJECT_ID}",
+        f"--incremental-date={last_processed_date}",
+        "--output-table=feature_set",
+        "--mode=append"
+    ]
+    
+    script_uri = f"gs://{GCS_BUCKET}/scripts/spark_feature_engineering.py"
+    
     try:
-        client = bigquery.Client(project=PROJECT_ID)
-        trainer = NBAModelTrainer(client)
+        job_id = dataproc_manager.submit_pyspark_job(cluster_name, script_uri, spark_args)
+        logger.info(f"Submitted feature engineering job: {job_id}")
+        return job_id
+        
+    except Exception as e:
+        logger.error(f"Failed to submit PySpark job: {e}")
+        raise
+
+@safe_task_execution
+def cleanup_dataproc_cluster(**context):
+    """Delete ephemeral cluster to save costs"""
+    cluster_name = context['task_instance'].xcom_pull(task_ids='create_dataproc_cluster_task')
+    
+    if cluster_name:
+        dataproc_manager = DataprocManager()
+        try:
+            dataproc_manager.delete_cluster(cluster_name)
+            logger.info(f"Deleted cluster: {cluster_name}")
+        except Exception as e:
+            logger.warning(f"Error deleting cluster {cluster_name}: {e}")
+            # Don't raise - cleanup should continue
+
+def check_model_retraining_needed(**context):
+    """Intelligent model retraining decision"""
+    from google.cloud import bigquery
+    
+    client = bigquery.Client(project=PROJECT_ID)
+    
+    # Check recent model performance
+    performance_query = f"""
+    SELECT 
+        AVG(CASE 
+            WHEN p.home_win_probability > 0.5 AND g.wl_home = 'W' THEN 1
+            WHEN p.home_win_probability <= 0.5 AND g.wl_home = 'L' THEN 1
+            ELSE 0
+        END) as recent_accuracy,
+        COUNT(*) as prediction_count
+    FROM `{PROJECT_ID}.{DATASET_ID}.predictions` p
+    JOIN `{PROJECT_ID}.{DATASET_ID}.raw_games` g ON p.game_id = g.game_id
+    WHERE p.prediction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+    AND g.wl_home IS NOT NULL
+    """
+    
+    try:
+        result = client.query(performance_query).to_dataframe()
+        
+        if not result.empty and result.iloc[0]['prediction_count'] > 10:
+            recent_accuracy = result.iloc[0]['recent_accuracy']
+            prediction_count = result.iloc[0]['prediction_count']
+            
+            logger.info(f"Recent model performance: {recent_accuracy:.3f} accuracy on {prediction_count} predictions")
+            
+            # Retrain if accuracy drops below threshold or weekly schedule
+            should_retrain = (
+                recent_accuracy < settings.MIN_MODEL_ACCURACY or
+                datetime.now().weekday() == 0  # Monday retraining
+            )
+            
+            if should_retrain:
+                logger.info("Model retraining triggered")
+                return 'train_models_task'
+            else:
+                logger.info("Model performance acceptable, skipping retraining")
+                return 'make_predictions_task'
+        else:
+            logger.info("Insufficient prediction history, proceeding with training")
+            return 'train_models_task'
+            
+    except Exception as e:
+        logger.warning(f"Error checking model performance: {e}")
+        return 'train_models_task'  # Default to training on error
+
+@safe_task_execution
+def train_models(**context):
+    """Train models with evaluation"""
+    from google.cloud import bigquery
+    
+    client = bigquery.Client(project=PROJECT_ID)
+    trainer = AdvancedNBAModelTrainer(client)
+    
+    try:
         model_data = trainer.train_all_models()
         
-        # Store training metrics
-        training_metrics = [{
+        # Store training metrics in BigQuery
+        training_record = {
             'training_date': model_data['training_date'],
             'training_samples': model_data['training_samples'],
             'test_samples': model_data['test_samples'],
             'win_loss_accuracy': model_data['model_performance']['win_loss']['accuracy'],
             'win_loss_auc': model_data['model_performance']['win_loss']['auc'],
+            'win_loss_log_loss': model_data['model_performance']['win_loss']['log_loss'],
+            'win_loss_brier_score': model_data['model_performance']['win_loss']['brier_score'],
             'spread_mae': model_data['model_performance']['spread']['mae'],
-            'spread_rmse': model_data['model_performance']['spread']['rmse']
-        }]
+            'spread_rmse': model_data['model_performance']['spread']['rmse'],
+            'model_version': model_data['model_version'],
+            'feature_count': len(model_data['feature_columns'])
+        }
         
-        client.load_table_from_json(
-            training_metrics, 
-            f"{PROJECT_ID}.{DATASET_ID}.model_training_history"
-        ).result()
-        
-        logger.info("Model training completed successfully")
-        return model_data['model_performance']
-        
-    except Exception as e:
-        logger.error(f"Error in model training: {e}")
-        raise
-
-def make_daily_predictions(**context):
-    """Make predictions for upcoming games"""
-    try:
-        client = bigquery.Client(project=PROJECT_ID)
-        predictor = NBAPredictor()
-        
-        # Get upcoming games
-        query = f"""
-        SELECT *
-        FROM `{PROJECT_ID}.{DATASET_ID}.feature_set`
-        WHERE game_date = CURRENT_DATE()
-        AND home_win IS NULL
-        """
-        
-        upcoming_games = client.query(query).to_dataframe()
-        
-        predictions = []
-        for _, game in upcoming_games.iterrows():
-            features = game.to_dict()
-            prediction = predictor.predict_game(features)
-            
-            if prediction:
-                pred_record = {
-                    'game_id': game['game_id'],
-                    'prediction_date': datetime.now().isoformat(),
-                    'home_win_probability': prediction['home_win_probability'],
-                    'predicted_spread': prediction['predicted_spread'],
-                    'confidence': prediction['confidence']
-                }
-                predictions.append(pred_record)
-        
-        if predictions:
-            client.load_table_from_json(
-                predictions,
-                f"{PROJECT_ID}.{DATASET_ID}.predictions"
-            ).result()
-            logger.info(f"Made predictions for {len(predictions)} games")
-        
-        return {"predictions_made": len(predictions)}
-        
-    except Exception as e:
-        logger.error(f"Error making predictions: {e}")
-        raise
-
-def check_model_performance(**context):
-    """Check if model retraining is needed"""
-    try:
-        client = bigquery.Client(project=PROJECT_ID)
-        
-        # Check recent performance
-        query = f"""
-        SELECT AVG(correct_prediction) as recent_accuracy
-        FROM (
-            SELECT 
-                CASE 
-                    WHEN p.home_win_probability > 0.5 AND g.home_win THEN 1
-                    WHEN p.home_win_probability <= 0.5 AND NOT g.home_win THEN 1
-                    ELSE 0
-                END as correct_prediction
-            FROM `{PROJECT_ID}.{DATASET_ID}.predictions` p
-            JOIN `{PROJECT_ID}.{DATASET_ID}.game_stats` g ON p.game_id = g.game_id
-            WHERE p.prediction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
-            AND g.home_win IS NOT NULL
+        # Upload to training history table
+        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+        job = client.load_table_from_json(
+            [training_record],
+            f"{PROJECT_ID}.{DATASET_ID}.model_training_history",
+            job_config=job_config
         )
-        """
+        job.result()
         
-        result = client.query(query).to_dataframe()
-        
-        if not result.empty and result.iloc[0]['recent_accuracy'] is not None:
-            recent_accuracy = result.iloc[0]['recent_accuracy']
-            logger.info(f"Recent model accuracy: {recent_accuracy:.3f}")
-            
-            # Trigger retraining if accuracy drops below threshold
-            if recent_accuracy < 0.52:  # Below 52% accuracy
-                logger.warning("Model performance degraded, triggering retraining")
-                return True
-        
-        # Also retrain weekly
-        return datetime.now().weekday() == 0  # Monday
+        logger.info("Model training completed and logged")
+        return {
+            'model_path': model_data['model_path'],
+            'performance_summary': model_data['model_performance']
+        }
         
     except Exception as e:
-        logger.error(f"Error checking model performance: {e}")
-        return False
+        logger.error(f"Model training failed: {e}")
+        raise
 
-# Task Definitions
+# Task Definitions with Configuration
 
-# 1. Infrastructure Setup
-create_dataset = BigQueryCreateEmptyDatasetOperator(
-    task_id="create_dataset",
-    dataset_id=DATASET_ID,
-    project_id=PROJECT_ID,
-    location=LOCATION,
+# Infrastructure
+initialize_infrastructure_task = PythonOperator(
+    task_id="initialize_infrastructure_task",
+    python_callable=initialize_infrastructure,
     dag=dag,
 )
 
-# 2. Data Collection
+# Data Pipeline
+get_last_processed_date_task = PythonOperator(
+    task_id="get_last_processed_date_task",
+    python_callable=get_last_processed_date,
+    dag=dag,
+)
+
 collect_data_task = PythonOperator(
-    task_id='collect_daily_data',
-    python_callable=collect_daily_data,
+    task_id="collect_nba_data_task",
+    python_callable=collect_nba_data,
     retries=3,
     retry_delay=timedelta(minutes=10),
     dag=dag,
 )
 
-# 3. Data Quality Checks
-check_raw_data = BigQueryCheckOperator(
-    task_id="check_raw_data_exists",
-    sql=f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.game_stats` WHERE game_date = CURRENT_DATE()",
-    use_legacy_sql=False,
-    location=LOCATION,
+validate_data_quality_task = PythonOperator(
+    task_id="validate_data_quality_task",
+    python_callable=validate_data_quality,
     dag=dag,
 )
 
-# 4. Feature Engineering
-create_features = BigQueryInsertJobOperator(
-    task_id="create_features",
-    configuration={
-        "query": {
-            "query": CREATE_FEATURE_SET_QUERY,
-            "useLegacySql": False,
-            "writeDisposition": "WRITE_TRUNCATE",
-        }
-    },
-    location=LOCATION,
+# Feature Engineering Branch
+feature_engineering_branch = BranchPythonOperator(
+    task_id="check_feature_engineering_needed_task",
+    python_callable=check_feature_engineering_needed,
     dag=dag,
 )
 
-# 5. Feature Quality Validation
-validate_features = BigQueryValueCheckOperator(
-    task_id="validate_feature_quality",
-    sql=f"SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.feature_set` WHERE features_created_at >= CURRENT_DATE()",
-    pass_value=0,
-    tolerance=None,
-    use_legacy_sql=False,
-    location=LOCATION,
+skip_feature_engineering_task = PythonOperator(
+    task_id="skip_feature_engineering_task",
+    python_callable=lambda: logger.info("Skipping feature engineering - no new data"),
     dag=dag,
 )
 
-# 6. Data Quality Report
-generate_quality_report = BigQueryInsertJobOperator(
-    task_id="generate_quality_report",
-    configuration={
-        "query": {
-            "query": DATA_QUALITY_CHECK_QUERY,
-            "useLegacySql": False,
-        }
-    },
-    location=LOCATION,
+# Dataproc Operations
+create_dataproc_cluster_task = DataprocCreateClusterOperator(
+    task_id="create_dataproc_cluster_task",
+    project_id=PROJECT_ID,
+    cluster_config=settings.dataproc_cluster_config,
+    region=GCP_REGION,
+    cluster_name=DATAPROC_CLUSTER_NAME,
     dag=dag,
 )
 
-# 7. Model Performance Check
-check_performance = PythonOperator(
-    task_id='check_model_performance',
-    python_callable=check_model_performance,
+submit_spark_job_task = DataprocSubmitPySparkJobOperator(
+    task_id="submit_spark_feature_engineering_task",
+    main=f"gs://{GCS_BUCKET}/scripts/spark_feature_engineering.py",
+    cluster_name=DATAPROC_CLUSTER_NAME,
+    region=GCP_REGION,
+    project_id=PROJECT_ID,
     dag=dag,
 )
 
-# 8. Conditional training branch
-training_branch = BranchPythonOperator(
-    task_id='check_training_needed',
-    python_callable=should_retrain_model,
+delete_dataproc_cluster_task = DataprocDeleteClusterOperator(
+    task_id="cleanup_dataproc_cluster_task",
+    project_id=PROJECT_ID,
+    cluster_name=DATAPROC_CLUSTER_NAME,
+    region=GCP_REGION,
+    trigger_rule=TriggerRule.ALL_DONE,
     dag=dag,
 )
 
-# 9. Model Training
-train_models_task = PythonOperator(
-    task_id='train_models',
-    python_callable=train_models,
-    retries=1,
-    retry_delay=timedelta(minutes=30),
-    execution_timeout=timedelta(hours=2),
-    dag=dag,
-)
-
-# 10. Daily Predictions
-make_predictions_task = PythonOperator(
-    task_id='make_daily_predictions',
-    python_callable=make_daily_predictions,
+# Model Training Branch
+model_training_branch = BranchPythonOperator(
+    task_id="check_model_retraining_needed_task",
+    python_callable=check_model_retraining_needed,
     trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=dag,
 )
 
-# 11. Model Evaluation
-evaluate_predictions = BigQueryInsertJobOperator(
-    task_id="evaluate_recent_predictions",
-    configuration={
-        "query": {
-            "query": f"""
-            CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.daily_evaluation` AS
-            SELECT 
-                CURRENT_DATE() as evaluation_date,
-                COUNT(*) as total_predictions,
-                AVG(CASE 
-                    WHEN p.home_win_probability > 0.5 AND g.home_win THEN 1
-                    WHEN p.home_win_probability <= 0.5 AND NOT g.home_win THEN 1
-                    ELSE 0
-                END) as accuracy,
-                AVG(ABS(p.predicted_spread - (g.home_score - g.away_score))) as avg_spread_error
-            FROM `{PROJECT_ID}.{DATASET_ID}.predictions` p
-            JOIN `{PROJECT_ID}.{DATASET_ID}.game_stats` g ON p.game_id = g.game_id
-            WHERE p.prediction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
-            AND g.home_win IS NOT NULL
-            """,
-            "useLegacySql": False,
-        }
-    },
-    location=LOCATION,
+train_models_task = PythonOperator(
+    task_id="train_models_task",
+    python_callable=train_models,
+    execution_timeout=timedelta(hours=3),
     dag=dag,
 )
 
-# 12. Cleanup Old Data
-cleanup_old_predictions = BigQueryInsertJobOperator(
-    task_id="cleanup_old_predictions",
-    configuration={
-        "query": {
-            "query": f"""
-            DELETE FROM `{PROJECT_ID}.{DATASET_ID}.predictions`
-            WHERE prediction_date < DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
-            """,
-            "useLegacySql": False,
-        }
-    },
-    location=LOCATION,
+# Prediction and Evaluation
+make_predictions_task = PythonOperator(
+    task_id="make_predictions_task",
+    python_callable=lambda: logger.info("Making predictions (implementation needed)"),
+    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=dag,
 )
-
 
 # Task Dependencies
-create_dataset >> collect_data_task >> check_raw_data
-check_raw_data >> create_features >> validate_features
-validate_features >> generate_quality_report
-generate_quality_report >> training_branch
+initialize_infrastructure_task >> get_last_processed_date_task
+get_last_processed_date_task >> collect_data_task >> validate_data_quality_task
+validate_data_quality_task >> feature_engineering_branch
 
-# Conditional training path branch
-training_branch >> [train_models_task, make_predictions_task]
+# Feature Engineering Path
+feature_engineering_branch >> [create_dataproc_cluster_task, skip_feature_engineering_task]
+create_dataproc_cluster_task >> submit_spark_job_task >> delete_dataproc_cluster_task
 
-# Make predictions
-train_models_task >> make_predictions_task
-
-# Evaluation and cleanup
-make_predictions_task >> evaluate_predictions >> cleanup_old_predictions
+# Model Training Path
+[delete_dataproc_cluster_task, skip_feature_engineering_task] >> model_training_branch
+model_training_branch >> [train_models_task, make_predictions_task]
