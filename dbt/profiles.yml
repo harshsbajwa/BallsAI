@@ -1,0 +1,23 @@
+nba_analytics:
+  outputs:
+    dev:
+      type: postgres
+      host: localhost
+      user: postgres
+      password: password
+      port: 5432
+      dbname: nba_pipeline
+      schema: analytics_dev
+      threads: 4
+      keepalives_idle: 0
+    prod:
+      type: postgres
+      host: postgres-service
+      user: postgres
+      password: password
+      port: 5432
+      dbname: nba_pipeline
+      schema: analytics
+      threads: 4
+      keepalives_idle: 0
+  target: dev
