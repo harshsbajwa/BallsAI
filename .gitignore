@@ -18,3 +18,6 @@ logs/
 
 # Plugins
 plugins/
+
+# Historic Data
+data/
