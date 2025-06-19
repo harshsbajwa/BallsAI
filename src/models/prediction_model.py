@@ -76,7 +76,7 @@ class NBAPlayerProjector(nn.Module):
         return self.network(x)
 
 class NBAMLPipeline:
-    def __init__(self, model_path: str = "models/"):
+    def __init__(self, model_path: str = "models"):
         self.model_path = model_path
         self.game_predictor = None
         self.player_projector = None
@@ -152,26 +152,19 @@ class NBAMLPipeline:
     def train_game_predictor(self, training_data: pd.DataFrame):
         """Train the game prediction model"""
         logger.info("Training game prediction model...")
-        
-        # Ensure the output directory exists
         os.makedirs(self.model_path, exist_ok=True)
 
-        # Create a clean DataFrame with one row per game
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
+
+        # Data preparation
         game_cols = ['game_id', 'home_team_id', 'away_team_id', 'home_score', 'away_score']
         games_df = training_data[game_cols].drop_duplicates().reset_index(drop=True)
-
-        # Prepare features
         features_df = self.prepare_game_features(games_df, training_data)
-
-        # Prepare targets from the clean `games_df`
         y_winner = (games_df['home_score'] > games_df['away_score']).astype(int)
         y_scores = games_df[['home_score', 'away_score']].values
-
-        # Scale features
         self.feature_scaler = StandardScaler()
         X_scaled = self.feature_scaler.fit_transform(features_df.values)
-
-        # Split data
         X_train, X_test, y_winner_train, y_winner_test, y_scores_train, y_scores_test = train_test_split(
             X_scaled, y_winner, y_scores, test_size=0.2, random_state=42
         )
@@ -180,9 +173,14 @@ class NBAMLPipeline:
         X_train_tensor = torch.FloatTensor(X_train)
         y_winner_train_tensor = torch.FloatTensor(y_winner_train.values).unsqueeze(1)
         y_scores_train_tensor = torch.FloatTensor(y_scores_train)
+        
+        X_test_tensor = torch.FloatTensor(X_test).to(device)
+        y_winner_test_tensor = torch.FloatTensor(y_winner_test.values).unsqueeze(1).to(device)
+        y_scores_test_tensor = torch.FloatTensor(y_scores_test).to(device)
 
         # Initialize model
         self.game_predictor = NBAGamePredictor(input_size=X_train.shape[1])
+        self.game_predictor.to(device)
 
         # Training setup
         criterion_winner = nn.BCELoss()
@@ -190,68 +188,70 @@ class NBAMLPipeline:
         optimizer = torch.optim.Adam(self.game_predictor.parameters(), lr=0.001, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10)
 
-        # Training loop
+        # Data loaders
+        train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_winner_train_tensor, y_scores_train_tensor)
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=512, shuffle=True)
+
         best_loss = float('inf')
         patience_counter = 0
 
         for epoch in range(200):
             self.game_predictor.train()
+            
+            # Iterate over batches
+            for batch_X, batch_y_winner, batch_y_scores in train_loader:
+                batch_X = batch_X.to(device)
+                batch_y_winner = batch_y_winner.to(device)
+                batch_y_scores = batch_y_scores.to(device)
 
-            # Forward pass
-            winner_pred, scores_pred = self.game_predictor(X_train_tensor)
+                # Forward pass
+                winner_pred, scores_pred = self.game_predictor(batch_X)
 
-            # Calculate losses
-            winner_loss = criterion_winner(winner_pred, y_winner_train_tensor)
-            scores_loss = criterion_scores(scores_pred, y_scores_train_tensor)
-            total_loss = winner_loss + 0.1 * scores_loss  # Weight the losses
+                # Calculate losses
+                winner_loss = criterion_winner(winner_pred, batch_y_winner)
+                scores_loss = criterion_scores(scores_pred, batch_y_scores)
+                total_loss = winner_loss + 0.1 * scores_loss
 
-            # Backward pass
-            optimizer.zero_grad()
-            total_loss.backward()
-            optimizer.step()
+                # Backward pass
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
 
             # Validation
             if epoch % 10 == 0:
                 self.game_predictor.eval()
                 with torch.no_grad():
-                    X_test_tensor = torch.FloatTensor(X_test)
                     winner_pred_val, scores_pred_val = self.game_predictor(X_test_tensor)
-
-                    val_winner_loss = criterion_winner(
-                        winner_pred_val,
-                        torch.FloatTensor(y_winner_test.values).unsqueeze(1)
-                    )
-                    val_scores_loss = criterion_scores(
-                        scores_pred_val,
-                        torch.FloatTensor(y_scores_test)
-                    )
+                    
+                    val_winner_loss = criterion_winner(winner_pred_val, y_winner_test_tensor)
+                    val_scores_loss = criterion_scores(scores_pred_val, y_scores_test_tensor)
                     val_total_loss = val_winner_loss + 0.1 * val_scores_loss
-
+                    
                     logger.info(f"Epoch {epoch}: Train Loss: {total_loss:.4f}, Val Loss: {val_total_loss:.4f}")
-
-                    # Early stopping
+                    
                     if val_total_loss < best_loss:
                         best_loss = val_total_loss
                         patience_counter = 0
-                        # Save best model
-                        torch.save(self.game_predictor.state_dict(), f"{self.model_path}/game_predictor_best.pth")
+                        torch.save(self.game_predictor.state_dict(), os.path.join(self.model_path, "game_predictor_best.pth"))
                     else:
                         patience_counter += 1
                         if patience_counter >= 20:
                             logger.info("Early stopping triggered")
                             break
-
+                    
                     scheduler.step(val_total_loss)
 
         # Save final model and preprocessors
-        torch.save(self.game_predictor.state_dict(), f"{self.model_path}/game_predictor_final.pth")
-        joblib.dump(self.feature_scaler, f"{self.model_path}/feature_scaler.pkl")
-
+        torch.save(self.game_predictor.state_dict(), os.path.join(self.model_path, "game_predictor_final.pth"))
+        joblib.dump(self.feature_scaler, os.path.join(self.model_path, "feature_scaler.pkl"))
         logger.info("Game predictor training completed")
 
     def train_player_projector(self, training_data: pd.DataFrame):
-        """Train the player projection model"""
         logger.info("Training player projection model...")
+        os.makedirs(self.model_path, exist_ok=True)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
         
         # Ensure the output directory exists
         os.makedirs(self.model_path, exist_ok=True)
@@ -276,8 +276,8 @@ class NBAMLPipeline:
         y = features_df[target_cols].fillna(0).values
         
         # Scale features
-        self.feature_scaler = StandardScaler()
-        X_scaled = self.feature_scaler.fit_transform(X)
+        player_feature_scaler = StandardScaler()
+        X_scaled = player_feature_scaler.fit_transform(X)
         
         # Split data
         X_train, X_test, y_train, y_test = train_test_split(
@@ -287,19 +287,22 @@ class NBAMLPipeline:
         # Convert to tensors
         X_train_tensor = torch.FloatTensor(X_train)
         y_train_tensor = torch.FloatTensor(y_train)
-        X_test_tensor = torch.FloatTensor(X_test)
-        y_test_tensor = torch.FloatTensor(y_test)
+        X_test_tensor = torch.FloatTensor(X_test).to(device)
+        y_test_tensor = torch.FloatTensor(y_test).to(device)
         
         # Initialize model
         self.player_projector = NBAPlayerProjector(
             input_size=X_train.shape[1], 
             output_size=len(target_cols)
         )
+        self.player_projector.to(device)
         
         # Training setup
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.player_projector.parameters(), lr=0.001, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10)
+        train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1024, shuffle=True)
         
         # Training loop
         best_loss = float('inf')
@@ -308,14 +311,18 @@ class NBAMLPipeline:
         for epoch in range(300):
             self.player_projector.train()
             
-            # Forward pass
-            predictions = self.player_projector(X_train_tensor)
-            loss = criterion(predictions, y_train_tensor)
-            
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # Iterate over batches
+            for batch_X, batch_y in train_loader:
+                batch_X = batch_X.to(device)
+                batch_y = batch_y.to(device)
+                
+                # Forward pass
+                predictions = self.player_projector(batch_X)
+                loss = criterion(predictions, batch_y)
+                # Backward pass
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
             
             # Validation
             if epoch % 20 == 0:
@@ -326,11 +333,10 @@ class NBAMLPipeline:
                     
                     logger.info(f"Epoch {epoch}: Train Loss: {loss:.4f}, Val Loss: {val_loss:.4f}")
                     
-                    # Early stopping
                     if val_loss < best_loss:
                         best_loss = val_loss
                         patience_counter = 0
-                        torch.save(self.player_projector.state_dict(), f"{self.model_path}/player_projector_best.pth")
+                        torch.save(self.player_projector.state_dict(), os.path.join(self.model_path, "player_projector_best.pth"))
                     else:
                         patience_counter += 1
                         if patience_counter >= 15:
@@ -339,28 +345,37 @@ class NBAMLPipeline:
                     
                     scheduler.step(val_loss)
         
-        # Save final model
-        torch.save(self.player_projector.state_dict(), f"{self.model_path}/player_projector_final.pth")
-        joblib.dump(self.feature_scaler, f"{self.model_path}/player_feature_scaler.pkl")
-        joblib.dump(self.feature_cols, f"{self.model_path}/player_feature_cols.pkl")
+        # Save final model and preprocessors
+        torch.save(self.player_projector.state_dict(), os.path.join(self.model_path, "player_projector_final.pth"))
+        joblib.dump(player_feature_scaler, os.path.join(self.model_path, "player_feature_scaler.pkl"))
+        joblib.dump(feature_cols, os.path.join(self.model_path, "player_feature_cols.pkl"))
         
         logger.info("Player projector training completed")
     
     def load_models(self):
         """Load trained models"""
         try:
-            # Load game predictor
-            self.game_predictor = NBAGamePredictor(input_size=50)
-            self.game_predictor.load_state_dict(torch.load(f"{self.model_path}/game_predictor_best.pth"))
+            # Deployment on CPU
+            device = torch.device('cpu')
+            logger.info(f"Loading models to device: {device}")
+
+            # Load Game Predictor
+            self.game_predictor = NBAGamePredictor(input_size=24)
+            game_predictor_path = os.path.join(self.model_path, "game_predictor_best.pth")
+            state_dict = torch.load(game_predictor_path, map_location=device)
+            self.game_predictor.load_state_dict(state_dict)
             self.game_predictor.eval()
-            
-            # Load player projector
-            self.player_projector = NBAPlayerProjector(input_size=50, output_size=15)
-            self.player_projector.load_state_dict(torch.load(f"{self.model_path}/player_projector_best.pth"))
+            self.feature_scaler = joblib.load(os.path.join(self.model_path, "feature_scaler.pkl"))
+
+            # Load Player Projector
+            self.feature_columns = joblib.load(os.path.join(self.model_path, "player_feature_cols.pkl"))
+            player_input_size = len(self.feature_columns)
+            self.player_projector = NBAPlayerProjector(input_size=player_input_size, output_size=15)
+            player_projector_path = os.path.join(self.model_path, "player_projector_best.pth")
+            state_dict = torch.load(player_projector_path, map_location=device)
+            self.player_projector.load_state_dict(state_dict)
             self.player_projector.eval()
-            
-            # Load preprocessors
-            self.feature_scaler = joblib.load(f"{self.model_path}/feature_scaler.pkl")
+            self.player_feature_scaler = joblib.load(os.path.join(self.model_path, "player_feature_scaler.pkl"))
             
             logger.info("Models loaded successfully")
         except Exception as e:
@@ -400,7 +415,7 @@ class NBAMLPipeline:
         
         # Prepare features
         features = np.array(list(player_features.values())).reshape(1, -1)
-        features_scaled = self.feature_scaler.transform(features)
+        features_scaled = self.player_feature_scaler.transform(features)
         features_tensor = torch.FloatTensor(features_scaled)
         
         # Predict

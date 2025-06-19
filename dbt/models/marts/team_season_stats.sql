@@ -16,5 +16,5 @@ select
     avg(blocks) as avg_blocks,
     avg(turnovers) as avg_turnovers,
     current_timestamp as calculated_at
-from {{ source('public', 'team_statistics') }}
+from {{ ref('stg_team_statistics') }}
 group by team_id, season_year

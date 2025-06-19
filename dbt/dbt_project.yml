@@ -1,8 +1,8 @@
-name: 'nba_analytics'
-version: '1.0.0'
+name: "nba_analytics"
+version: "1.0.0"
 config-version: 2
 
-profile: 'nba_analytics'
+profile: "nba_analytics"
 
 model-paths: ["models"]
 analysis-paths: ["analyses"]
@@ -19,6 +19,8 @@ clean-targets:
 models:
   nba_analytics:
     staging:
+      +schema: staging
       +materialized: view
     marts:
+      +schema: marts
       +materialized: table

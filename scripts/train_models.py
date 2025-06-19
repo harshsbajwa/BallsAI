@@ -4,6 +4,7 @@
 import sys
 import os
 import pandas as pd
+import torch
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -17,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Train ML models"""
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        logger.info(f"CUDA is available! Training on GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        device = torch.device("cpu")
+        logger.warning("CUDA not available. Training on CPU.")
+
     try:
         pipeline = NBAMLPipeline()
 

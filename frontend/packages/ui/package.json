@@ -1,0 +1,55 @@
+{
+  "name": "@nba/ui",
+  "version": "0.1.0",
+  "private": true,
+  "exports": {
+    "./button": { "types": "./dist/button.d.ts", "default": "./dist/button.js" },
+    "./card": { "types": "./dist/card.d.ts", "default": "./dist/card.js" },
+    "./dropdown-menu": { "types": "./dist/dropdown-menu.d.ts", "default": "./dist/dropdown-menu.js" },
+    "./form": { "types": "./dist/form.d.ts", "default": "./dist/form.js" },
+    "./input": { "types": "./dist/input.d.ts", "default": "./dist/input.js" },
+    "./label": { "types": "./dist/label.d.ts", "default": "./dist/label.js" },
+    "./select": { "types": "./dist/select.d.ts", "default": "./dist/select.js" },
+    "./table": { "types": "./dist/table.d.ts", "default": "./dist/table.js" },
+    "./toast": { "types": "./dist/toast.d.ts", "default": "./dist/toast.js" },
+    "./toaster": { "types": "./dist/toaster.d.ts", "default": "./dist/toaster.js" },
+    "./use-toast": { "types": "./dist/use-toast.d.ts", "default": "./dist/use-toast.js" },
+    "./utils": { "types": "./dist/utils.d.ts", "default": "./dist/utils.js" }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" --fix",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.1",
+    "@radix-ui/react-dropdown-menu": "^2.1.1",
+    "@radix-ui/react-label": "^2.1.0",
+    "@radix-ui/react-select": "^2.1.1",
+    "@radix-ui/react-slot": "^1.1.0",
+    "@radix-ui/react-tabs": "^1.1.0",
+    "@radix-ui/react-toast": "^1.2.1",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.0.0",
+    "lucide-react": "^0.408.0",
+    "tailwind-merge": "^2.0.0",
+    "tailwindcss-animate": "^1.0.7"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "react-hook-form": "^7.47.0"
+  },
+  "devDependencies": {
+    "@hookform/resolvers": "^3.3.2",
+    "@nba/eslint-config": "workspace:*",
+    "@nba/tailwind-config": "workspace:*",
+    "@nba/typescript-config": "workspace:*",
+    "@types/react": "^18.2.33",
+    "eslint": "^8.57.0",
+    "react-hook-form": "^7.47.0",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.3.3",
+    "zod": "^3.22.4"
+  }
+}

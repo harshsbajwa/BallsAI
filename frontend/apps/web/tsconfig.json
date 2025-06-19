@@ -1,0 +1,33 @@
+{
+  "extends": "@nba/typescript-config/nextjs.json",
+  "compilerOptions": {
+    "composite": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "moduleResolution": "bundler",
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    "src/types/**/*.d.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ],
+  "references": [
+    { "path": "../../packages/api" },
+    { "path": "../../packages/auth" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/ui" }
+  ]
+}

@@ -12,7 +12,7 @@ nba_analytics:
       keepalives_idle: 0
     prod:
       type: postgres
-      host: postgres-service
+      host: "{{ env_var('DBT_HOST', 'postgres-service') }}"
       user: postgres
       password: password
       port: 5432

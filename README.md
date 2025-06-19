@@ -1,1 +1,1 @@
-NBA Betting Predictions Model
+BallsAI

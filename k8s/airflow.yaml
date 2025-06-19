@@ -4,8 +4,8 @@ metadata:
   name: airflow-secret
 type: Opaque
 data:
-  fernet-key: Zm9vYmFyX2Zlcm5ldF9rZXk=
-  executor: S3VCRVJORVRFUw==
+  fernet-key: IUYDCXYkc5_pzfmfHCESJGicXb9sEpV_CGfgU1BCuWA=
+  executor: TG9jYWxFeGVjdXRvcg==
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -16,40 +16,32 @@ data:
     [core]
     dags_folder = /opt/airflow/dags
     base_log_folder = /opt/airflow/logs
-    executor = KubernetesExecutor
+    # FIX: Use LocalExecutor for simplicity, matching docker-compose
+    executor = LocalExecutor
     sql_alchemy_conn = postgresql://postgres:password@postgres-service:5432/nba_pipeline
     load_examples = False
     
     [webserver]
     expose_config = True
     web_server_port = 8080
-    
-    [kubernetes]
-    namespace = default
-    worker_container_repository = apache/airflow
-    worker_container_tag = 2.7.0
-    
-    [celery]
-    broker_url = redis://redis-service:6379/0
-    result_backend = postgresql://postgres:password@postgres-service:5432/nba_pipeline
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: airflow-webserver
+  name: airflow
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: airflow-webserver
+      app: airflow
   template:
     metadata:
       labels:
-        app: airflow-webserver
+        app: airflow
     spec:
       containers:
       - name: airflow-webserver
-        image: apache/airflow:2.7.0
+        image: nba-pipeline/airflow:latest
         command: ["airflow", "webserver"]
         env:
         - name: AIRFLOW__CORE__SQL_ALCHEMY_CONN
@@ -59,6 +51,8 @@ spec:
             secretKeyRef:
               name: airflow-secret
               key: fernet-key
+        - name: AIRFLOW__CORE__EXECUTOR
+          value: "LocalExecutor"
         ports:
         - containerPort: 8080
         volumeMounts:
@@ -66,31 +60,8 @@ spec:
           mountPath: /opt/airflow/dags
         - name: airflow-logs
           mountPath: /opt/airflow/logs
-      volumes:
-      - name: airflow-dags
-        hostPath:
-          path: /path/to/nba-pipeline/airflow/dags
-      - name: airflow-logs
-        hostPath:
-          path: /path/to/nba-pipeline/airflow/logs
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: airflow-scheduler
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: airflow-scheduler
-  template:
-    metadata:
-      labels:
-        app: airflow-scheduler
-    spec:
-      containers:
       - name: airflow-scheduler
-        image: apache/airflow:2.7.0
+        image: nba-pipeline/airflow:latest
         command: ["airflow", "scheduler"]
         env:
         - name: AIRFLOW__CORE__SQL_ALCHEMY_CONN
@@ -100,6 +71,8 @@ spec:
             secretKeyRef:
               name: airflow-secret
               key: fernet-key
+        - name: AIRFLOW__CORE__EXECUTOR
+          value: "LocalExecutor"
         volumeMounts:
         - name: airflow-dags
           mountPath: /opt/airflow/dags
@@ -119,7 +92,7 @@ metadata:
   name: airflow-webserver-service
 spec:
   selector:
-    app: airflow-webserver
+    app: airflow
   ports:
   - port: 8080
     targetPort: 8080

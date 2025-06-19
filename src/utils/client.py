@@ -1,8 +1,9 @@
 from nba_api.stats.endpoints import (
-    scoreboard, boxscoretraditionalv2, playergamelog, teamgamelog,
+    boxscoretraditionalv2, playergamelog, teamgamelog,
     commonplayerinfo, commonteamroster, leaguegamefinder
 )
 from nba_api.stats.static import players, teams
+from nba_api.live.nba.endpoints import scoreboard
 import pandas as pd
 from datetime import datetime, timedelta
 import time
@@ -19,10 +20,9 @@ class NBADataClient:
     def get_todays_games(self) -> Dict:
         """Get today's NBA games"""
         try:
-            today = datetime.now().strftime('%m/%d/%Y')
-            board = scoreboard.Scoreboard(game_date=today)
+            board = scoreboard.ScoreBoard()
             time.sleep(self.rate_limit_delay)
-            return board.get_normalized_dict()
+            return board.games.get_dict()
         except Exception as e:
             logger.error(f"Error fetching today's games: {e}")
             return {}
@@ -33,8 +33,8 @@ class NBADataClient:
         for i in range(days_back):
             date = (datetime.now() - timedelta(days=i)).strftime('%m/%d/%Y')
             try:
-                board = scoreboard.Scoreboard(game_date=date)
-                game_data = board.get_normalized_dict()
+                board = scoreboard.ScoreBoard()
+                game_data = board.get_dict()
                 if game_data.get('GameHeader'):
                     games.extend(game_data['GameHeader'])
                 time.sleep(self.rate_limit_delay)

@@ -1,0 +1,29 @@
+version: 2
+
+sources:
+  - name: public
+    description: "Source schema for raw data loaded by the Airflow ingestion tasks."
+    schema: public
+    tables:
+      - name: games
+      - name: players
+      - name: player_statistics
+      - name: team_statistics
+      - name: teams
+      
+  - name: analytics
+    description: "Schema for outputs from Spark jobs."
+    schema: analytics
+    tables:
+      - name: analytics_player_impact_rating
+        description: "Comprehensive Player Impact Rating (PIR) calculated by a daily Spark job."
+        columns:
+          - name: person_id
+            tests:
+              - not_null
+              - relationships:
+                  to: ref('stg_players')
+                  field: person_id
+          - name: season_year
+            tests:
+              - not_null

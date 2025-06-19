@@ -49,6 +49,6 @@ select
               (field_goals_attempted - field_goals_made) - 
               (free_throws_attempted - free_throws_made) - turnovers) / num_minutes * 36
         else 0
-    end as player_efficiency_rating,
+    end as impact_rating_per_36_min,
     created_at
 from {{ source('public', 'player_statistics') }}

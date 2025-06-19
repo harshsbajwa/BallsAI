@@ -1,27 +1,37 @@
-# Official Airflow image as a base
-FROM apache/airflow:2.7.0
+# Standard Python image
+FROM python:3.11-slim
 
-# Switch to root temporarily to install system-level packages
-USER root
+# Set env variables
+ENV AIRFLOW_HOME=/opt/airflow
+ENV PYTHONPATH="${AIRFLOW_HOME}"
 
-# Install system dependencies
+# Install OS-level dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
+    openjdk-17-jre-headless \
     postgresql-client \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Switch back to the airflow user
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create non-root Airflow user
+RUN useradd --system --user-group -d ${AIRFLOW_HOME} -s /bin/bash airflow
+
+# Copy application code and set ownership
+COPY airflow/dags/ ${AIRFLOW_HOME}/dags/
+COPY src/ ${AIRFLOW_HOME}/src/
+COPY dbt/ ${AIRFLOW_HOME}/dbt/
+RUN chown -R airflow:airflow ${AIRFLOW_HOME}
+
+# Set working directory
+WORKDIR ${AIRFLOW_HOME}
+
+# Switch to Airflow user
 USER airflow
 
-# Install uv
-RUN pip install --no-cache-dir uv
-
-# Get dependencies
-COPY pyproject.toml uv.lock ./
-
-# Install dependencies
-RUN uv sync
-
-# Copy source
-COPY src/ /opt/airflow/src/
+# Expose Airflow port
+EXPOSE 8080

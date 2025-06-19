@@ -1,5 +1,5 @@
 [project]
-name = "nba-pipeline"
+name = "ballsAI"
 version = "0.1.0"
 description = "NBA Data Engineering and ML Pipeline"
 requires-python = ">=3.11"
@@ -20,6 +20,7 @@ dependencies = [
     "kubernetes>=28.1.0",
     "pydantic>=2.4.0",
     "python-multipart>=0.0.6",
+    "slowapi>=0.0.14",
 ]
 
 [build-system]
@@ -28,3 +29,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 packages = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "locust>=2.37.10",
+    "pytest>=8.4.0",
+    "pytest-mock>=3.14.1",
+    "schemathesis>=4.0.2",
+]

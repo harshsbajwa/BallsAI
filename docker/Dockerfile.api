@@ -10,27 +10,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-RUN pip install --no-cache-dir uv
-
-# Get dependencies
-COPY pyproject.toml uv.lock ./
-
 # Install dependencies
-RUN uv sync
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source
+# Copy source code and models
 COPY src/ ./src/
 COPY models/ ./models/
-COPY scripts/ ./scripts/
-COPY data/ ./data/
 
-# Create a non-root user for security
+# Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Expose the port the app runs on
+# Expose app port
 EXPOSE 8000
 
 # Define run command
-CMD ["uv", "run", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,30 @@
+{
+  "name": "frontend",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "tooling/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev --parallel",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "type-check": "turbo type-check",
+    "dev:native": "turbo run dev --filter=native",
+    "dev:web": "turbo run dev --filter=web",
+    "db:push": "turbo run db:push --filter=web",
+    "db:studio": "turbo run db:studio --filter=web"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.9"
+  },
+  "packageManager": "pnpm@9.6.0",
+  "pnpm": {
+    "overrides": {
+      "metro": "0.80.9",
+      "metro-resolver": "0.80.9",
+      "metro-runtime": "0.80.9"
+    }
+  }
+}

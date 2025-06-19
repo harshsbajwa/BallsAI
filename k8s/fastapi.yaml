@@ -63,4 +63,4 @@ metadata:
   name: redis-secret
 type: Opaque
 data:
-  url: cmVkaXM6Ly86UEFTU1dPUkRAcmVkaXMtc2VydmljZTo2Mzc5
+  url: cmVkaXM6Ly9yZWRpcy1zZXJ2aWNlOjYzNzk=

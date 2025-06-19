@@ -1,0 +1,11 @@
+version: 2
+
+models:
+  - name: stg_games
+    description: "Staging model for raw game data. One row per game."
+    columns:
+      - name: game_id
+        description: "The unique identifier for a game."
+        tests:
+          - not_null
+          - unique

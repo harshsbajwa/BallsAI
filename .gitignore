@@ -21,3 +21,8 @@ plugins/
 
 # Historic Data
 data/
+
+# Test Configuration Files
+.hypothesis/
+test.db
+.pytest_cache/

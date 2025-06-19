@@ -18,10 +18,10 @@ class DataLoader:
         try:
             self._load_players(db)
             self._load_teams(db)
-            self._build_team_lookup(db)
+            self._build_team_lookup()
             self._load_games(db)
-            self._load_player_statistics(db)
-            self._load_team_statistics(db)
+            self._load_player_statistics_optimized(db)
+            self._load_team_statistics_optimized(db)
             logger.info("Initial data loading completed successfully")
         except Exception as e:
             logger.error(f"Error loading initial data: {e}")
@@ -63,7 +63,13 @@ class DataLoader:
         """Load teams data"""
         logger.info("Loading teams data...")
         df = pd.read_csv(f"{self.data_path}/TeamHistories.csv")
-        df_sorted = df.sort_values(by=['teamId', 'seasonActiveTill'], ascending=[True, False])
+
+        current_year = datetime.now().year
+        df_nba_teams = df[
+            (df['league'] == 'NBA') &
+            (df['seasonActiveTill'] >= current_year - 1)
+        ]
+        df_sorted = df_nba_teams.sort_values(by=['teamId', 'seasonActiveTill'], ascending=[True, False])
         df_unique_teams = df_sorted.drop_duplicates(subset='teamId', keep='first')
 
         teams = []
@@ -83,17 +89,21 @@ class DataLoader:
         db.commit()
         logger.info(f"Loaded {len(teams)} unique teams")
 
-    def _build_team_lookup(self, db: Session):
-        """Build an in-memory lookup map for team names to IDs"""
-        logger.info("Building team lookup map...")
-        teams = db.query(Team).all()
-        self.team_lookup = {(team.team_city, team.team_name): team.team_id for team in teams}
+    def _build_team_lookup(self):
+        """Build an in-memory lookup map"""
+        logger.info("Building comprehensive team lookup map from source file...")
+        df_history = pd.read_csv(f"{self.data_path}/TeamHistories.csv")
+        
+        self.team_lookup = {}
+        for _, row in df_history.iterrows():
+            self.team_lookup[(row['teamCity'], row['teamName'])] = row['teamId']
+            
         logger.info(f"Team lookup map built with {len(self.team_lookup)} entries.")
 
     def _load_games(self, db: Session):
         """Load games data"""
         logger.info("Loading games data...")
-        df = pd.read_csv(f"{self.data_path}/Games.csv")
+        df = pd.read_csv(f"{self.data_path}/Games.csv", low_memory=False)
         
         games = []
         for _, row in df.iterrows():
@@ -104,7 +114,7 @@ class DataLoader:
                 away_team_id=row['awayteamId'],
                 home_score=int(row['homeScore']) if pd.notna(row['homeScore']) else None,
                 away_score=int(row['awayScore']) if pd.notna(row['awayScore']) else None,
-                winner_team_id=int(row['winner']) if pd.notna(row['winner']) else None,
+                winning_team_id=int(row['winner']) if pd.notna(row['winner']) else None,
                 game_type=row['gameType'] if pd.notna(row['gameType']) else None,
                 attendance=int(row['attendance']) if pd.notna(row['attendance']) else None,
                 arena_id=int(row['arenaId']) if pd.notna(row['arenaId']) else None,
@@ -118,115 +128,93 @@ class DataLoader:
         db.commit()
         logger.info(f"Loaded {len(games)} games")
     
-    def _load_player_statistics(self, db: Session):
+    def _load_player_statistics_optimized(self, db: Session):
         """Load player statistics data"""
         logger.info("Loading player statistics data...")
-        df = pd.read_csv(f"{self.data_path}/PlayerStatistics.csv", dtype=str, low_memory=False)
-
-        chunk_size = 10000
+        
+        chunk_size = 100000
         total_loaded = 0
+        
+        team_map = pd.Series(self.team_lookup.values(), index=self.team_lookup.keys())
 
-        for chunk_start in range(0, len(df), chunk_size):
-            chunk_end = min(chunk_start + chunk_size, len(df))
-            chunk_df = df.iloc[chunk_start:chunk_end]
+        for chunk_df in pd.read_csv(f"{self.data_path}/PlayerStatistics.csv", dtype=str, low_memory=False, chunksize=chunk_size):
+            
+            player_team_key = list(zip(chunk_df['playerteamCity'], chunk_df['playerteamName']))
+            opponent_team_key = list(zip(chunk_df['opponentteamCity'], chunk_df['opponentteamName']))
+            chunk_df['team_id'] = team_map.loc[player_team_key].values
+            chunk_df['opponent_team_id'] = team_map.loc[opponent_team_key].values
+            
+            chunk_df.dropna(subset=['team_id', 'opponent_team_id'], inplace=True)
 
-            player_stats = []
-            for _, row in chunk_df.iterrows():
-                player_team_key = (row['playerteamCity'], row['playerteamName'])
-                opponent_team_key = (row['opponentteamCity'], row['opponentteamName'])
+            rename_map = {
+                'personId': 'person_id', 'gameId': 'game_id', 'gameDate': 'game_date',
+                'win': 'win', 'home': 'home', 'numMinutes': 'num_minutes', 'points': 'points',
+                'assists': 'assists', 'blocks': 'blocks', 'steals': 'steals',
+                'fieldGoalsAttempted': 'field_goals_attempted', 'fieldGoalsMade': 'field_goals_made',
+                'fieldGoalsPercentage': 'field_goals_percentage', 'threePointersAttempted': 'three_pointers_attempted',
+                'threePointersMade': 'three_pointers_made', 'threePointersPercentage': 'three_pointers_percentage',
+                'freeThrowsAttempted': 'free_throws_attempted', 'freeThrowsMade': 'free_throws_made',
+                'freeThrowsPercentage': 'free_throws_percentage', 'reboundsDefensive': 'rebounds_defensive',
+                'reboundsOffensive': 'rebounds_offensive', 'reboundsTotal': 'rebounds_total',
+                'foulsPersonal': 'fouls_personal', 'turnovers': 'turnovers', 'plusMinusPoints': 'plus_minus_points'
+            }
+            chunk_df.rename(columns=rename_map, inplace=True)
 
-                player_team_id = self.team_lookup.get(player_team_key)
-                opponent_team_id = self.team_lookup.get(opponent_team_key)
+            numeric_cols = list(rename_map.values())[5:]
+            for col in numeric_cols:
+                chunk_df[col] = pd.to_numeric(chunk_df[col], errors='coerce').fillna(0)
 
-                if not player_team_id or not opponent_team_id:
-                    continue
-
-                stat = PlayerStatistic(
-                    person_id=int(row['personId']),
-                    game_id=int(row['gameId']),
-                    game_date=pd.to_datetime(row['gameDate']),
-                    team_id=player_team_id,
-                    opponent_team_id=opponent_team_id,
-                    win=bool(int(float(row['win']))) if pd.notna(row['win']) else False,
-                    home=bool(int(float(row['home']))) if pd.notna(row['home']) else False,
-                    num_minutes=float(row['numMinutes']) if pd.notna(row['numMinutes']) else 0.0,
-                    points=int(float(row['points'])) if pd.notna(row['points']) else 0,
-                    assists=int(float(row['assists'])) if pd.notna(row['assists']) else 0,
-                    blocks=int(float(row['blocks'])) if pd.notna(row['blocks']) else 0,
-                    steals=int(float(row['steals'])) if pd.notna(row['steals']) else 0,
-                    field_goals_attempted=int(float(row['fieldGoalsAttempted'])) if pd.notna(row['fieldGoalsAttempted']) else 0,
-                    field_goals_made=int(float(row['fieldGoalsMade'])) if pd.notna(row['fieldGoalsMade']) else 0,
-                    field_goals_percentage=float(row['fieldGoalsPercentage']) if pd.notna(row['fieldGoalsPercentage']) else 0.0,
-                    three_pointers_attempted=int(float(row['threePointersAttempted'])) if pd.notna(row['threePointersAttempted']) else 0,
-                    three_pointers_made=int(float(row['threePointersMade'])) if pd.notna(row['threePointersMade']) else 0,
-                    three_pointers_percentage=float(row['threePointersPercentage']) if pd.notna(row['threePointersPercentage']) else 0.0,
-                    free_throws_attempted=int(float(row['freeThrowsAttempted'])) if pd.notna(row['freeThrowsAttempted']) else 0,
-                    free_throws_made=int(float(row['freeThrowsMade'])) if pd.notna(row['freeThrowsMade']) else 0,
-                    free_throws_percentage=float(row['freeThrowsPercentage']) if pd.notna(row['freeThrowsPercentage']) else 0.0,
-                    rebounds_defensive=int(float(row['reboundsDefensive'])) if pd.notna(row['reboundsDefensive']) else 0,
-                    rebounds_offensive=int(float(row['reboundsOffensive'])) if pd.notna(row['reboundsOffensive']) else 0,
-                    rebounds_total=int(float(row['reboundsTotal'])) if pd.notna(row['reboundsTotal']) else 0,
-                    fouls_personal=int(float(row['foulsPersonal'])) if pd.notna(row['foulsPersonal']) else 0,
-                    turnovers=int(float(row['turnovers'])) if pd.notna(row['turnovers']) else 0,
-                    plus_minus_points=int(float(row['plusMinusPoints'])) if pd.notna(row['plusMinusPoints']) else 0,
-                )
-                player_stats.append(stat)
-
-            db.bulk_save_objects(player_stats)
-            db.commit()
-            total_loaded += len(player_stats)
-            logger.info(f"Loaded {total_loaded} player statistics records...")
+            chunk_df['game_date'] = pd.to_datetime(chunk_df['game_date'])
+            chunk_df['win'] = chunk_df['win'].astype(float).astype(bool)
+            chunk_df['home'] = chunk_df['home'].astype(float).astype(bool)
+            
+            records = chunk_df[list(rename_map.values()) + ['team_id', 'opponent_team_id']].to_dict(orient='records')
+            
+            if records:
+                db.bulk_insert_mappings(PlayerStatistic, records)
+                db.commit()
+                total_loaded += len(records)
+                logger.info(f"Loaded {total_loaded} player statistics records...")
 
         logger.info(f"Completed loading {total_loaded} player statistics records")
 
-    def _load_team_statistics(self, db: Session):
+    def _load_team_statistics_optimized(self, db: Session):
         """Load team statistics data"""
         logger.info("Loading team statistics data...")
-        df = pd.read_csv(f"{self.data_path}/TeamStatistics.csv")
-        
-        chunk_size = 5000
+        chunk_size = 50000
         total_loaded = 0
-        
-        for chunk_start in range(0, len(df), chunk_size):
-            chunk_end = min(chunk_start + chunk_size, len(df))
-            chunk_df = df.iloc[chunk_start:chunk_end]
+
+        for chunk_df in pd.read_csv(f"{self.data_path}/TeamStatistics.csv", chunksize=chunk_size):
+            rename_map = {
+                'gameId': 'game_id', 'teamId': 'team_id', 'opponentTeamId': 'opponent_team_id',
+                'gameDate': 'game_date', 'home': 'home', 'win': 'win', 'teamScore': 'team_score',
+                'opponentScore': 'opponent_score', 'assists': 'assists', 'blocks': 'blocks',
+                'steals': 'steals', 'fieldGoalsAttempted': 'field_goals_attempted',
+                'fieldGoalsMade': 'field_goals_made', 'fieldGoalsPercentage': 'field_goals_percentage',
+                'threePointersAttempted': 'three_pointers_attempted', 'threePointersMade': 'three_pointers_made',
+                'threePointersPercentage': 'three_pointers_percentage', 'freeThrowsAttempted': 'free_throws_attempted',
+                'freeThrowsMade': 'free_throws_made', 'freeThrowsPercentage': 'free_throws_percentage',
+                'reboundsDefensive': 'rebounds_defensive', 'reboundsOffensive': 'rebounds_offensive',
+                'reboundsTotal': 'rebounds_total', 'foulsPersonal': 'fouls_personal',
+                'turnovers': 'turnovers', 'plusMinusPoints': 'plus_minus_points'
+            }
+            chunk_df.rename(columns=rename_map, inplace=True)
             
-            team_stats = []
-            for _, row in chunk_df.iterrows():
-                stat = TeamStatistic(
-                    game_id=row['gameId'],
-                    team_id=row['teamId'],
-                    opponent_team_id=row['opponentTeamId'],
-                    game_date=pd.to_datetime(row['gameDate']),
-                    home=bool(row['home']) if pd.notna(row['home']) else False,
-                    win=bool(row['win']) if pd.notna(row['win']) else False,
-                    team_score=int(row['teamScore']) if pd.notna(row['teamScore']) else 0,
-                    opponent_score=int(row['opponentScore']) if pd.notna(row['opponentScore']) else 0,
-                    assists=int(row['assists']) if pd.notna(row['assists']) else 0,
-                    blocks=int(row['blocks']) if pd.notna(row['blocks']) else 0,
-                    steals=int(row['steals']) if pd.notna(row['steals']) else 0,
-                    field_goals_attempted=int(row['fieldGoalsAttempted']) if pd.notna(row['fieldGoalsAttempted']) else 0,
-                    field_goals_made=int(row['fieldGoalsMade']) if pd.notna(row['fieldGoalsMade']) else 0,
-                    field_goals_percentage=float(row['fieldGoalsPercentage']) if pd.notna(row['fieldGoalsPercentage']) else 0.0,
-                    three_pointers_attempted=int(row['threePointersAttempted']) if pd.notna(row['threePointersAttempted']) else 0,
-                    three_pointers_made=int(row['threePointersMade']) if pd.notna(row['threePointersMade']) else 0,
-                    three_pointers_percentage=float(row['threePointersPercentage']) if pd.notna(row['threePointersPercentage']) else 0.0,
-                    free_throws_attempted=int(row['freeThrowsAttempted']) if pd.notna(row['freeThrowsAttempted']) else 0,
-                    free_throws_made=int(row['freeThrowsMade']) if pd.notna(row['freeThrowsMade']) else 0,
-                    free_throws_percentage=float(row['freeThrowsPercentage']) if pd.notna(row['freeThrowsPercentage']) else 0.0,
-                    rebounds_defensive=int(row['reboundsDefensive']) if pd.notna(row['reboundsDefensive']) else 0,
-                    rebounds_offensive=int(row['reboundsOffensive']) if pd.notna(row['reboundsOffensive']) else 0,
-                    rebounds_total=int(row['reboundsTotal']) if pd.notna(row['reboundsTotal']) else 0,
-                    fouls_personal=int(row['foulsPersonal']) if pd.notna(row['foulsPersonal']) else 0,
-                    turnovers=int(row['turnovers']) if pd.notna(row['turnovers']) else 0,
-                    plus_minus_points=int(row['plusMinusPoints']) if pd.notna(row['plusMinusPoints']) else 0,
-                )
-                team_stats.append(stat)
+            numeric_cols = list(rename_map.values())[6:]
+            for col in numeric_cols:
+                chunk_df[col] = pd.to_numeric(chunk_df[col], errors='coerce').fillna(0)
+
+            chunk_df['game_date'] = pd.to_datetime(chunk_df['game_date'])
+            chunk_df['win'] = chunk_df['win'].astype(bool)
+            chunk_df['home'] = chunk_df['home'].astype(bool)
+
+            records = chunk_df[list(rename_map.values())].to_dict(orient='records')
             
-            db.bulk_save_objects(team_stats)
-            db.commit()
-            total_loaded += len(team_stats)
-            logger.info(f"Loaded {total_loaded} team statistics records...")
+            if records:
+                db.bulk_insert_mappings(TeamStatistic, records)
+                db.commit()
+                total_loaded += len(records)
+                logger.info(f"Loaded {total_loaded} team statistics records...")
         
         logger.info(f"Completed loading {total_loaded} team statistics records")
 

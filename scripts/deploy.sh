@@ -10,9 +10,6 @@ if ! command -v k3s &> /dev/null; then
     exit 1
 fi
 
-echo "Creating directories..."
-mkdir -p models logs data/processed
-
 echo "Building Docker images..."
 docker build -f docker/Dockerfile.api -t nba-pipeline/api:latest .
 docker build -f docker/Dockerfile.airflow -t nba-pipeline/airflow:latest .
@@ -39,7 +36,7 @@ kubectl wait --for=condition=ready pod -l app=nba-api --timeout=300s
 
 echo "Deploying Airflow..."
 kubectl apply -f k8s/airflow.yaml
-kubectl wait --for=condition=ready pod -l app=airflow-webserver --timeout=300s
+kubectl wait --for=condition=ready pod -l app=airflow --timeout=600s
 
 echo "Deployment completed!"
 echo ""
@@ -51,7 +48,7 @@ echo "MinIO Console:  http://$(kubectl get service minio-service -o jsonpath='{.
 echo ""
 echo "Default Credentials:"
 echo "==================="
-echo "Airflow: admin/admin"
+echo "Airflow: admin/admin (default for standalone, may need to be set)"
 echo "MinIO: minioadmin/minioadmin"
 echo ""
 echo "NBA Pipeline is ready to use!"

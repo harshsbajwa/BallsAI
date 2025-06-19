@@ -1,0 +1,36 @@
+{
+  "name": "@nba/db",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/client.js",
+  "types": "./dist/client.d.ts",
+  "exports": {
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "default": "./dist/schema.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint \"src/**/*.ts\" --fix",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.32.0",
+    "postgres": "^3.4.4",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@nba/eslint-config": "workspace:*",
+    "@nba/typescript-config": "workspace:*",
+    "@types/uuid": "^10.0.0",
+    "drizzle-kit": "^0.23.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.3.3"
+  }
+}

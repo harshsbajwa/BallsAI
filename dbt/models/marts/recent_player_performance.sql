@@ -12,7 +12,6 @@ select
     ps.blocks,
     ps.fg_percentage_calculated,
     ps.three_pt_percentage_calculated,
-    ps.player_efficiency_rating,
     -- Rolling averages (last 10 games)
     avg(ps.points) over (
         partition by ps.person_id 
